@@ -1,25 +1,44 @@
-FROM thewtex/centos-build:latest
+FROM dockbuild/centos5-devtoolset2-gcc4:latest
 MAINTAINER CommonTK Community <ctk-developers@commontk.org>
 # Build and package the CTK AppLauncher
 
-RUN yum update -y && \
-  yum install -y \
-    libX11-devel \
-    libXt-devel \
-    libXext-devel \
-    libXrender-devel
-
 WORKDIR /usr/src
 
-RUN wget http://packages.kitware.com/download/item/6175/qt-everywhere-opensource-src-4.8.6.tar.gz && \
- md5=$(md5sum ./qt-everywhere-opensource-src-4.8.6.tar.gz | awk '{ print $1 }') && \
- [ $md5 == "2edbe4d6c2eff33ef91732602f3518eb" ] && \
- tar -xzvf qt-everywhere-opensource-src-4.8.6.tar.gz && \
- rm qt-everywhere-opensource-src-4.8.6.tar.gz && \
- mv qt-everywhere-opensource-src-4.8.6 qt-everywhere-opensource-release-src-4.8.6 && \
- mkdir qt-everywhere-opensource-release-build-4.8.6 && \
- cd qt-everywhere-opensource-release-src-4.8.6 && \
- LD=${CXX} ./configure -prefix /usr/src/qt-everywhere-opensource-release-build-4.8.6 \
+ARG QT_INSTALL_DIR=/usr/src/qt-everywhere-opensource-release-build-4.8.6
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN \
+ yum update -y && \
+ #
+ # Qt dependencies: https://doc.qt.io/archives/qt-4.8/requirements-x11.html
+ #
+ yum install -y \
+   libX11-devel \
+   libXt-devel \
+   libXext-devel \
+   libXrender-devel \
+ && \
+ #
+ # Download Qt sources
+ #
+ QT_ROOT=qt-everywhere-opensource-src-4.8.6 && \
+ curl -LO http://packages.kitware.com/download/item/6175/${QT_ROOT}.tar.gz && \
+ echo "2edbe4d6c2eff33ef91732602f3518eb  ${QT_ROOT}.tar.gz" > ${QT_ROOT}.tar.gz.md5 && \
+ md5sum -c ${QT_ROOT}.tar.gz.md5 && \
+ tar -xzvf ${QT_ROOT}.tar.gz && \
+ rm -f ${QT_ROOT}.tar.gz && \
+ rm -f ${QT_ROOT}.tar.gz.md5 && \
+ QT_SRC_DIR=/usr/src/qt-everywhere-opensource-release-src-4.8.6 && \
+ mv ${QT_ROOT} ${QT_SRC_DIR} && \
+ #
+ # Build Qt
+ #
+ cd /usr/src && \
+ mkdir ${QT_INSTALL_DIR} && \
+ cd ${QT_SRC_DIR} && \
+ LD=${CXX} ./configure \
+   -prefix ${QT_INSTALL_DIR} \
    -confirm-license -opensource \
    -static \
    -release \
@@ -62,7 +81,18 @@ RUN wget http://packages.kitware.com/download/item/6175/qt-everywhere-opensource
    -no-gtkstyle && \
   make -j$(grep -c processor /proc/cpuinfo) && \
   make install && \
-  find . -name '*.o' -delete
+  rm -rf ${QT_SRC_DIR} && \
+  rm -rf ${QT_INSTALL_DIR}/q3porting.xml && \
+  rm -rf ${QT_INSTALL_DIR}/demos && \
+  rm -rf ${QT_INSTALL_DIR}/doc && \
+  rm -rf ${QT_INSTALL_DIR}/examples && \
+  rm -rf ${QT_INSTALL_DIR}/phrasebooks && \
+  rm -rf ${QT_INSTALL_DIR}/tests && \
+  rm -rf ${QT_INSTALL_DIR}/translations && \
+  #
+  # cleanup
+  #
+  yum clean all
 
 # Build-time metadata as defined at http://label-schema.org
 ARG BUILD_DATE

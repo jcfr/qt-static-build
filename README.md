@@ -1,6 +1,6 @@
 # qt-static-build
 
-## MacOSX and Windows
+## macOS and Windows
 
 Available as download archives.
 

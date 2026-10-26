@@ -1,0 +1,179 @@
+name: Build Qt6
+
+on:
+  workflow_dispatch:
+    inputs:
+      qt_version:
+        description: "Qt version to build (e.g. 6.12.0)"
+        required: true
+        default: "6.12.0"
+      publish:
+        description: "Publish the archives as a GitHub release"
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - ".github/workflows/build-qt6.yml"
+      - "scripts/**"
+      - "tests/**"
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/build-qt6.yml"
+      - "scripts/**"
+      - "tests/**"
+
+permissions: {} # No permissions are granted at the workflow level
+
+env:
+  QT_VERSION: ${{ inputs.qt_version || '6.12.0' }}
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    # Builds take well under an hour; fail stalled jobs instead of waiting
+    # for the 6 hour default.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-msvc2022
+            arch: x86_64
+            runner: windows-2022
+            msvc_arch: amd64
+          - platform: windows-msvc2022
+            arch: arm64
+            runner: windows-11-arm
+            msvc_arch: arm64
+
+          - platform: manylinux_2_28
+            arch: x86_64
+            runner: ubuntu-24.04
+            image: quay.io/pypa/manylinux_2_28_x86_64
+          - platform: manylinux_2_28
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux_2_28_aarch64
+
+          - platform: macos
+            arch: x86_64
+            runner: macos-15-intel
+          - platform: macos
+            arch: arm64
+            runner: macos-15
+    env:
+      ARCHIVE_NAME: qt-${{ inputs.qt_version || '6.12.0' }}-static-${{ matrix.platform }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: List Visual Studio installations
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -all -products * -format text |
+            Select-String "installationPath|installationVersion|displayName"
+          Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*" -Directory | Select-Object FullName
+
+      - name: Setup MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: ${{ matrix.msvc_arch }}
+          # Select the Visual Studio 2022 (v143) toolset: runners may only have
+          # newer Visual Studio versions (windows-11-arm has Visual Studio
+          # 2026), whose static libraries could not be linked using Visual
+          # Studio 2022.
+          toolset: "14.4"
+
+      - name: Build Qt (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/build-qt6.ps1 -QtVersion $env:QT_VERSION -Name $env:ARCHIVE_NAME -OutputDir dist
+
+      # The manylinux_2_28 image (AlmaLinux 8, glibc 2.28) keeps the archive
+      # usable on older distributions.
+      - name: Build Qt (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            -e QT_WORK_DIR=/tmp/qt \
+            ${{ matrix.image }} \
+            bash -c "bash scripts/install-linux-deps.sh && \
+              bash scripts/build-qt6.sh '$QT_VERSION' '$ARCHIVE_NAME' dist \
+                -xcb -fontconfig -system-freetype -no-glib"
+
+      - name: Build Qt (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja
+          arch=${{ matrix.arch }}
+          QT_WORK_DIR=$RUNNER_TEMP/qt bash scripts/build-qt6.sh "$QT_VERSION" "$ARCHIVE_NAME" dist \
+            -- -DCMAKE_OSX_ARCHITECTURES=$arch
+
+      - name: Upload archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARCHIVE_NAME }}
+          path: dist/${{ env.ARCHIVE_NAME }}.tar.xz
+          compression-level: 0
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG_NAME: qt-${{ inputs.qt_version }}-static
+    steps:
+      - name: Download archives
+        run: |
+          gh run download ${{ github.run_id }} --repo ${{ github.repository }} --dir dist
+          mv dist/*/*.tar.xz .
+          sha256sum *.tar.xz | tee SHA256SUMS.txt
+
+      - name: Create release
+        run: |
+          cat > notes.md <<EOF
+          Static builds of Qt ${QT_VERSION} (qtbase only) for Windows, Linux, and macOS on x86_64 and arm64.
+
+          Built by the [Build Qt6 workflow](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          from commit ${{ github.sha }} using \`scripts/build-qt6.sh\` (Linux, macOS) and \`scripts/build-qt6.ps1\` (Windows).
+
+          | Archive | Toolchain |
+          | ------- | --------- |
+          | \`qt-${QT_VERSION}-static-windows-msvc2022-{x86_64,arm64}.tar.xz\` | Visual Studio 2022, static runtime (\`/MT\`) |
+          | \`qt-${QT_VERSION}-static-manylinux_2_28-{x86_64,arm64}.tar.xz\` | manylinux_2_28 (AlmaLinux 8, glibc 2.28), GCC toolset; xcb platform plugin |
+          | \`qt-${QT_VERSION}-static-macos-{x86_64,arm64}.tar.xz\` | Xcode (macos-15 runners), Qt default deployment target |
+
+          ## Usage
+
+          Each archive contains a single top-level directory named after the archive. It is relocatable:
+          extract it anywhere (\`tar -xf <archive>.tar.xz\`) and point CMake at it using
+          \`-DQt6_DIR=<dir>/lib/cmake/Qt6\` or \`-DCMAKE_PREFIX_PATH=<dir>\`.
+
+          On Windows, consumers must link the static MSVC runtime (\`-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\`).
+
+          To reduce the size of executables, Qt is built optimized for size and without the built-in
+          MIME database and time zone support (\`-no-feature-mimetype-database -no-feature-timezone\`).
+          On Linux, linking requires the X11/xcb, xkbcommon, and fontconfig development packages
+          (see \`scripts/install-linux-deps.sh\`).
+
+          SHA256 checksums are listed in \`SHA256SUMS.txt\`.
+          EOF
+          gh release create "$TAG_NAME" \
+            --repo ${{ github.repository }} \
+            --target ${{ github.sha }} \
+            --title "$TAG_NAME" \
+            --notes-file notes.md \
+            *.tar.xz SHA256SUMS.txt
